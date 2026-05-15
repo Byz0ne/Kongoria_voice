@@ -1,0 +1,4 @@
+#include <windows.h>
+
+101 RCDATA "../dist/kongoria_voice.dll"
+102 RCDATA "../dist/kongoria_voice.ini"
