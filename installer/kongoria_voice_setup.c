@@ -50,9 +50,19 @@ static bool write_resource(WORD resource_id, const char *target_path, char *erro
 		return false;
 	}
 
+	if (GetFileAttributesA(target_path) != INVALID_FILE_ATTRIBUTES) {
+		SetFileAttributesA(target_path, FILE_ATTRIBUTE_NORMAL);
+	}
+
 	HANDLE file = CreateFileA(target_path, GENERIC_WRITE, 0, NULL, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
 	if (file == INVALID_HANDLE_VALUE) {
-		snprintf(error, error_size, "Unable to write %s. Close Mumble and try again.", target_path);
+		DWORD err = GetLastError();
+		if (err == ERROR_SHARING_VIOLATION || err == ERROR_LOCK_VIOLATION) {
+			snprintf(error, error_size, "Unable to replace %s because it is in use. Close Mumble and run setup again.",
+					 target_path);
+		} else {
+			snprintf(error, error_size, "Unable to replace %s. Windows error %lu.", target_path, (unsigned long) err);
+		}
 		return false;
 	}
 
@@ -107,19 +117,15 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE previous, LPSTR command_line, i
 		return 1;
 	}
 
-	bool ini_existed = GetFileAttributesA(ini_path) != INVALID_FILE_ATTRIBUTES;
-	if (!ini_existed) {
-		if (!write_resource(IDR_KONGORIA_INI, ini_path, error, sizeof(error))) {
-			MessageBoxA(NULL, error, "Kongoria Voice Setup", MB_ICONERROR | MB_OK);
-			return 1;
-		}
+	if (!write_resource(IDR_KONGORIA_INI, ini_path, error, sizeof(error))) {
+		MessageBoxA(NULL, error, "Kongoria Voice Setup", MB_ICONERROR | MB_OK);
+		return 1;
 	}
 
 	char message[1200];
 	snprintf(message, sizeof(message),
-			 "Kongoria Voice plugin installed.\n\nPlugin:\n%s\n\nConfig:\n%s\n%s\n\nRestart Mumble, then enable/check \"Kongoria Voice - Spatial Audio\".",
-			 dll_path, ini_path,
-			 ini_existed ? "\nExisting config was kept." : "\nDefault config was created. Edit it if your server host or port changed.");
+			 "Kongoria Voice plugin installed.\n\nPlugin:\n%s\n\nConfig:\n%s\n\nExisting plugin and config files were replaced.\n\nRestart Mumble, then enable/check \"Kongoria Voice - Spatial Audio\".",
+			 dll_path, ini_path);
 	MessageBoxA(NULL, message, "Kongoria Voice Setup", MB_ICONINFORMATION | MB_OK);
 	return 0;
 }
