@@ -217,6 +217,18 @@ static void safe_copy(char *dst, size_t dst_size, const char *src) {
 	snprintf(dst, dst_size, "%s", src);
 }
 
+static bool file_exists(const char *path) {
+	if (!path || !path[0]) {
+		return false;
+	}
+	FILE *file = fopen(path, "rb");
+	if (!file) {
+		return false;
+	}
+	fclose(file);
+	return true;
+}
+
 static char *trim(char *text) {
 	while (*text && isspace((unsigned char) *text)) {
 		text++;
@@ -369,9 +381,70 @@ static void discover_plugin_paths(void) {
 #endif
 }
 
+#ifndef _WIN32
+static void discover_linux_config_path(void) {
+	const char *explicit_config = getenv("KONGORIA_VOICE_CONFIG");
+	if (explicit_config && explicit_config[0]) {
+		safe_copy(g_config_path, sizeof(g_config_path), explicit_config);
+		return;
+	}
+
+	if (file_exists(g_config_path)) {
+		return;
+	}
+
+	const char *home = getenv("HOME");
+	const char *xdg_config_home = getenv("XDG_CONFIG_HOME");
+	const char *xdg_data_home = getenv("XDG_DATA_HOME");
+	char candidate[EXILE_MAX_PATH];
+
+	if (xdg_config_home && xdg_config_home[0]) {
+		snprintf(candidate, sizeof(candidate), "%s/Mumble/kongoria_voice.ini", xdg_config_home);
+		if (file_exists(candidate)) {
+			safe_copy(g_config_path, sizeof(g_config_path), candidate);
+			return;
+		}
+	}
+
+	if (xdg_data_home && xdg_data_home[0]) {
+		snprintf(candidate, sizeof(candidate), "%s/Mumble/Mumble/Plugins/kongoria_voice.ini", xdg_data_home);
+		if (file_exists(candidate)) {
+			safe_copy(g_config_path, sizeof(g_config_path), candidate);
+			return;
+		}
+		snprintf(candidate, sizeof(candidate), "%s/Mumble/Plugins/kongoria_voice.ini", xdg_data_home);
+		if (file_exists(candidate)) {
+			safe_copy(g_config_path, sizeof(g_config_path), candidate);
+			return;
+		}
+	}
+
+	if (home && home[0]) {
+		snprintf(candidate, sizeof(candidate), "%s/.config/Mumble/kongoria_voice.ini", home);
+		if (file_exists(candidate)) {
+			safe_copy(g_config_path, sizeof(g_config_path), candidate);
+			return;
+		}
+		snprintf(candidate, sizeof(candidate), "%s/.local/share/Mumble/Mumble/Plugins/kongoria_voice.ini", home);
+		if (file_exists(candidate)) {
+			safe_copy(g_config_path, sizeof(g_config_path), candidate);
+			return;
+		}
+		snprintf(candidate, sizeof(candidate), "%s/.local/share/Mumble/Plugins/kongoria_voice.ini", home);
+		if (file_exists(candidate)) {
+			safe_copy(g_config_path, sizeof(g_config_path), candidate);
+			return;
+		}
+	}
+}
+#endif
+
 static void load_config(void) {
 	set_default_config();
 	discover_plugin_paths();
+#ifndef _WIN32
+	discover_linux_config_path();
+#endif
 
 	FILE *file = fopen(g_config_path, "rb");
 	if (file) {
@@ -391,6 +464,8 @@ static void load_config(void) {
 			apply_config_value(key, value);
 		}
 		fclose(file);
+	} else {
+		file_log("config file not found at %s; using defaults unless environment overrides are set", g_config_path);
 	}
 
 #ifdef _WIN32
@@ -668,6 +743,9 @@ static DWORD WINAPI falloff_worker(LPVOID unused) {
 static void *falloff_worker(void *unused) {
 #endif
 	(void) unused;
+	bool logged_disabled_wait = false;
+	bool logged_hash_wait = false;
+	bool logged_api_key_wait = false;
 
 	while (worker_is_running()) {
 		char local_hash[EXILE_MAX_HASH];
@@ -675,10 +753,35 @@ static void *falloff_worker(void *unused) {
 		safe_copy(local_hash, sizeof(local_hash), g_local_hash);
 		unlock_state();
 
-		if (!g_config.enabled || !local_hash[0] || !g_config.api_key[0]) {
+		if (!g_config.enabled) {
+			if (!logged_disabled_wait) {
+				file_log("falloff_worker_wait plugin disabled by config");
+				logged_disabled_wait = true;
+			}
 			sleep_ms((unsigned int) g_config.reconnect_sec * 1000);
 			continue;
 		}
+		logged_disabled_wait = false;
+
+		if (!local_hash[0]) {
+			if (!logged_hash_wait) {
+				file_log("falloff_worker_wait local Mumble certificate hash is not available yet");
+				logged_hash_wait = true;
+			}
+			sleep_ms((unsigned int) g_config.reconnect_sec * 1000);
+			continue;
+		}
+		logged_hash_wait = false;
+
+		if (!g_config.api_key[0]) {
+			if (!logged_api_key_wait) {
+				file_log("falloff_worker_wait api_key is empty in config");
+				logged_api_key_wait = true;
+			}
+			sleep_ms((unsigned int) g_config.reconnect_sec * 1000);
+			continue;
+		}
+		logged_api_key_wait = false;
 
 		SOCKET sock = INVALID_SOCKET;
 		file_log("falloff_connect_attempt host=%s port=%d", g_config.server_host, g_config.server_port);
@@ -707,7 +810,8 @@ static void *falloff_worker(void *unused) {
 			continue;
 		}
 
-		log_both("connected to falloff %s:%d", g_config.server_host, g_config.server_port);
+		log_both("connected to falloff %s:%d using hash=%.*s", g_config.server_host, g_config.server_port, 8,
+				 local_hash);
 		uint64_t last_ping = monotonic_ms();
 
 		while (worker_is_running()) {
